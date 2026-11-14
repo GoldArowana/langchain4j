@@ -1,0 +1,88 @@
+name: Codex validation for async retry issue 7125
+on:
+  push:
+    branches: [codex-ci/async-retry-7125-8fd9b77f]
+permissions:
+  contents: read
+jobs:
+  validate:
+    name: Exact LangChain4j source (${{ matrix.scope }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {scope: unit, java: '17'}
+          - {scope: integration, java: '21'}
+          - {scope: format, java: '17'}
+    env:
+      EXPECTED_SOURCE: 4aa9b5d27b626a93eb677fbfff7e98d16944ce9d
+      EXPECTED_TREE: fd820af03821c8305bfd65442a9ecb52ded41e69
+      UPSTREAM_BASE: f77caec1f39b4cdc30f489bb180cd557a1962362
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: GoldArowana/langchain4j
+          ref: 4aa9b5d27b626a93eb677fbfff7e98d16944ce9d
+          fetch-depth: 5
+          persist-credentials: false
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.java }}
+      - name: Assert exact source and record runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = GoldArowana/langchain4j
+          test "$GITHUB_SHA" != "$EXPECTED_SOURCE"
+          origin=$(git config --get remote.origin.url)
+          test "${origin%.git}" = https://github.com/GoldArowana/langchain4j
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE"
+          test "$(git rev-parse HEAD^{tree})" = "$EXPECTED_TREE"
+          test "$(git rev-parse HEAD^)" = "$UPSTREAM_BASE"
+          git update-ref refs/remotes/origin/main "$UPSTREAM_BASE"
+          git diff HEAD --exit-code
+          printf 'event=%s source=%s tree=%s base=%s\n' "$GITHUB_SHA" "$EXPECTED_SOURCE" "$EXPECTED_TREE" "$UPSTREAM_BASE"
+          java -version
+          mvn -version
+      - name: Run Java CI unit tests and Javadoc
+        if: matrix.scope == 'unit'
+        run: mvn -B -U -DembeddingsSkipDownload -T8C test javadoc:aggregate
+      - name: Run core and main module integration verification
+        if: matrix.scope == 'integration'
+        run: |
+          mvn -B -U -T2 -pl langchain4j-core,langchain4j -am -DembeddingsSkipCache -DskipTests -DskipITs install
+          mvn -B -U -pl langchain4j-core,langchain4j -DembeddingsSkipCache -Dfailsafe.timeout=1200 verify
+      - name: Run Spotless validation
+        if: matrix.scope == 'format'
+        run: mvn -B -Pspotless validate
+      - name: Always assert exact source and tracked cleanliness
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE"
+          test "$(git rev-parse HEAD^{tree})" = "$EXPECTED_TREE"
+          git diff HEAD --exit-code
+          printf 'verified tracked source %s tree %s\n' "$EXPECTED_SOURCE" "$EXPECTED_TREE"
+      - name: Record test counts by module and test phase
+        if: always()
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from collections import defaultdict
+          from pathlib import Path
+          import json
+          import xml.etree.ElementTree as ET
+
+          summaries = defaultdict(lambda: dict(tests=0, failures=0, errors=0, skipped=0))
+          for file in Path(".").glob("**/target/*-reports/TEST-*.xml"):
+              module = str(file.parent.parent.parent)
+              group = f"{module}/{file.parent.name}"
+              suite = ET.parse(file).getroot()
+              for key in summaries[group]:
+                  summaries[group][key] += int(suite.get(key, "0"))
+          print(json.dumps(summaries, indent=2, sort_keys=True))
+          PY
