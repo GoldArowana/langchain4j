@@ -1,0 +1,47 @@
+name: Verify LangChain4j 7178 on Java 17
+
+on:
+  push:
+    branches: [codex-ci/langchain7178-6efbf124]
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      VERIFIED_COMMIT: 9af039dbcf20ee8c03f38076f67eb0e6d1fbaafe
+      VERIFIED_TREE: ad98f4b3b0a208686a44126916181707756b0e5a
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: GoldArowana/langchain4j
+          ref: 9af039dbcf20ee8c03f38076f67eb0e6d1fbaafe
+          persist-credentials: false
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Verify source and run full unit tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = GoldArowana/langchain4j
+          test "$GITHUB_EVENT_NAME" = push
+          test "$GITHUB_REF" = refs/heads/codex-ci/langchain7178-6efbf124
+          test "$(git rev-parse HEAD)" = "$VERIFIED_COMMIT"
+          test "$(git rev-parse HEAD^{tree})" = "$VERIFIED_TREE"
+          git diff HEAD --exit-code
+          printf 'event=%s source=%s tree=%s\n' "$GITHUB_SHA" "$VERIFIED_COMMIT" "$VERIFIED_TREE"
+          java -version
+          mvn -B --no-transfer-progress -DembeddingsSkipDownload -T2 clean test
+      - name: Verify tracked source after validation
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$VERIFIED_COMMIT"
+          test "$(git rev-parse HEAD^{tree})" = "$VERIFIED_TREE"
+          git diff HEAD --exit-code
