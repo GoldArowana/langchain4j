@@ -16,16 +16,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - pr: '7126'
-            source: 'f4f8b9a97cdfb9f541fdbc13411baf235b118694'
-            tree: 'b06122778942561ef53adc8e519fc292613763f5'
-            module: 'langchain4j-core'
-            suite: 'RetryDispatchTest'
-            testfile: 'langchain4j-core/src/test/java/dev/langchain4j/internal/RetryDispatchTest.java'
-            expected: 'completes_with_submission_rejection_without_blocking_other_delayed_tasks'
           - pr: '7180'
-            source: '32a929aec8d87b362df9c0b906bfaecce9be6a32'
-            tree: '5861e92bcafb8b12d1cdb06062a4a6e84e648b2a'
+            source: 'c9740bbb1579291458eba486a6e8ab06cdf9624a'
+            tree: 'dc271c808901ae5fe8acbb2bd96d68f89c205a72'
             module: 'langchain4j-open-ai'
             suite: 'OpenAiEmbeddingModelAsyncTest'
             testfile: 'langchain4j-open-ai/src/test/java/dev/langchain4j/model/openai/OpenAiEmbeddingModelAsyncTest.java'
@@ -76,6 +69,7 @@ jobs:
           rc=0
           ./mvnw -B --no-transfer-progress -DembeddingsSkipDownload -pl "$FOCUS_MODULE" -am \
             "-Dtest=$FOCUS_SUITE" -Dsurefire.failIfNoSpecifiedTests=false test || rc=$?
+          printf 'base_maven_exit=%s\n' "$rc"
           test "$rc" -ne 0
           python3 - <<'CHECK'
           import os
