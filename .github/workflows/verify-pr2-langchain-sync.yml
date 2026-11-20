@@ -1,0 +1,113 @@
+name: Verify LangChain4j upstream synchronization
+
+on:
+  push:
+    branches: ['codex-ci/pr2-langchain-sync-5c26d3e0']
+
+permissions:
+  contents: read
+
+jobs:
+  exact-source:
+    name: Verify PR ${{ matrix.pr }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - pr: '7126'
+            source: 'f4f8b9a97cdfb9f541fdbc13411baf235b118694'
+            tree: 'b06122778942561ef53adc8e519fc292613763f5'
+            module: 'langchain4j-core'
+            suite: 'RetryDispatchTest'
+            testfile: 'langchain4j-core/src/test/java/dev/langchain4j/internal/RetryDispatchTest.java'
+            expected: 'completes_with_submission_rejection_without_blocking_other_delayed_tasks'
+          - pr: '7180'
+            source: '32a929aec8d87b362df9c0b906bfaecce9be6a32'
+            tree: '5861e92bcafb8b12d1cdb06062a4a6e84e648b2a'
+            module: 'langchain4j-open-ai'
+            suite: 'OpenAiEmbeddingModelAsyncTest'
+            testfile: 'langchain4j-open-ai/src/test/java/dev/langchain4j/model/openai/OpenAiEmbeddingModelAsyncTest.java'
+            expected: 'a_late_transport_cancellation_completes_after_a_successful_sibling,a_successful_sibling_does_not_hide_transport_cancellation,cancelling_the_transport_completes_a_single_batch_result'
+    env:
+      EXPECT_SOURCE: ${{ matrix.source }}
+      EXPECT_TREE: ${{ matrix.tree }}
+      EXPECT_BASE: 'c5f5d093fe14d7061570474bc6f5e3cb117ec155'
+      EXPECT_BRANCH: 'refs/heads/codex-ci/pr2-langchain-sync-5c26d3e0'
+      FOCUS_MODULE: ${{ matrix.module }}
+      FOCUS_SUITE: ${{ matrix.suite }}
+      TEST_FILE: ${{ matrix.testfile }}
+      EXPECTED_FAILURES: ${{ matrix.expected }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: GoldArowana/langchain4j
+          ref: ${{ matrix.source }}
+          persist-credentials: false
+          fetch-depth: 2
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961
+        with:
+          distribution: temurin
+          java-version: '17.0.21+9'
+      - name: Verify event and source identities
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = GoldArowana/langchain4j
+          test "$GITHUB_EVENT_NAME" = push
+          test "$GITHUB_REF" = "$EXPECT_BRANCH"
+          test "$(git rev-parse HEAD)" = "$EXPECT_SOURCE"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$EXPECT_TREE"
+          test "$(git rev-parse HEAD^2)" = "$EXPECT_BASE"
+          git diff HEAD --exit-code
+          printf 'event=%s source=%s tree=%s base=%s\n' "$GITHUB_SHA" "$EXPECT_SOURCE" "$EXPECT_TREE" "$EXPECT_BASE"
+          java -version
+          ./mvnw -v
+      - name: Reproduce on upstream main with the exact regression tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          git worktree add --detach ../validation-base "$EXPECT_BASE"
+          trap 'git worktree remove --force ../validation-base' EXIT
+          git show "$EXPECT_SOURCE:$TEST_FILE" > "../validation-base/$TEST_FILE"
+          cd ../validation-base
+          test "$(git rev-parse HEAD)" = "$EXPECT_BASE"
+          rc=0
+          ./mvnw -B --no-transfer-progress -DembeddingsSkipDownload -pl "$FOCUS_MODULE" -am \
+            "-Dtest=$FOCUS_SUITE" -Dsurefire.failIfNoSpecifiedTests=false test || rc=$?
+          test "$rc" -ne 0
+          python3 - <<'CHECK'
+          import os
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+          module = Path(os.environ['FOCUS_MODULE'])
+          suite = os.environ['FOCUS_SUITE']
+          reports = list((module / 'target/surefire-reports').glob(f'TEST-*.{suite}.xml'))
+          assert len(reports) == 1, reports
+          results = ET.parse(reports[0]).getroot()
+          failures = {case.attrib['name']: ' '.join(child.attrib.get('message','') for child in case)
+                      for case in results.findall('testcase')
+                      if case.find('failure') is not None or case.find('error') is not None}
+          assert set(failures) == set(os.environ['EXPECTED_FAILURES'].split(',')), failures
+          if suite == 'RetryDispatchTest':
+              assert all('timer can dispatch another task' in message for message in failures.values()), failures
+          else:
+              assert all('TimeoutException' in message for message in failures.values()), failures
+          print(f'Expected upstream failures on {os.environ["EXPECT_BASE"]}: {failures}')
+          CHECK
+          cd "$GITHUB_WORKSPACE"
+      - name: Focused tests
+        run: ./mvnw -B --no-transfer-progress -DembeddingsSkipDownload -pl "$FOCUS_MODULE" -am "-Dtest=$FOCUS_SUITE" -Dsurefire.failIfNoSpecifiedTests=false test
+      - name: Spotless
+        run: ./mvnw -B --no-transfer-progress -pl "$FOCUS_MODULE" -Pspotless spotless:check
+      - name: Full Java 17 unit reactor
+        run: ./mvnw -B --no-transfer-progress -DembeddingsSkipDownload -T2 clean test
+      - name: Verify tracked source after validation
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECT_SOURCE"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$EXPECT_TREE"
+          git diff HEAD --exit-code
