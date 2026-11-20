@@ -1,37 +1,25 @@
-name: Verify LangChain4j upstream synchronization
-
+name: Attribute LangChain4j streaming assertion timing
 on:
   push:
     branches: ['codex-ci/pr2-langchain-sync-5c26d3e0']
-
 permissions:
   contents: read
-
 jobs:
-  exact-source:
-    name: Verify PR ${{ matrix.pr }}
+  paired:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    name: Streaming comparison ${{ matrix.label }}
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
         include:
-          - pr: '7180'
-            source: 'c9740bbb1579291458eba486a6e8ab06cdf9624a'
-            tree: 'dc271c808901ae5fe8acbb2bd96d68f89c205a72'
-            module: 'langchain4j-open-ai'
-            suite: 'OpenAiEmbeddingModelAsyncTest'
-            testfile: 'langchain4j-open-ai/src/test/java/dev/langchain4j/model/openai/OpenAiEmbeddingModelAsyncTest.java'
-            expected: 'a_late_transport_cancellation_completes_after_a_successful_sibling,a_successful_sibling_does_not_hide_transport_cancellation,cancelling_the_transport_completes_a_single_batch_result'
+          - {label: upstream, source: 'c5f5d093fe14d7061570474bc6f5e3cb117ec155', tree: '7fc6f0b1e975c6ab256817662547f5df8a0b67f3'}
+          - {label: candidate-7126, source: 'f4f8b9a97cdfb9f541fdbc13411baf235b118694', tree: 'b06122778942561ef53adc8e519fc292613763f5'}
     env:
       EXPECT_SOURCE: ${{ matrix.source }}
       EXPECT_TREE: ${{ matrix.tree }}
-      EXPECT_BASE: 'c5f5d093fe14d7061570474bc6f5e3cb117ec155'
-      EXPECT_BRANCH: 'refs/heads/codex-ci/pr2-langchain-sync-5c26d3e0'
-      FOCUS_MODULE: ${{ matrix.module }}
-      FOCUS_SUITE: ${{ matrix.suite }}
-      TEST_FILE: ${{ matrix.testfile }}
-      EXPECTED_FAILURES: ${{ matrix.expected }}
+      TEST_MODULE: integration-tests/integration-tests-test-assertions
+      TEST_FILE: integration-tests/integration-tests-test-assertions/src/test/java/com/example/support/StreamingTest.java
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -43,72 +31,92 @@ jobs:
         with:
           distribution: temurin
           java-version: '17.0.21+9'
-      - name: Verify event and source identities
-        shell: bash
+      - name: Verify source
         run: |
           set -euo pipefail
           test "$GITHUB_REPOSITORY" = GoldArowana/langchain4j
           test "$GITHUB_EVENT_NAME" = push
-          test "$GITHUB_REF" = "$EXPECT_BRANCH"
+          test "$GITHUB_REF" = refs/heads/codex-ci/pr2-langchain-sync-5c26d3e0
           test "$(git rev-parse HEAD)" = "$EXPECT_SOURCE"
           test "$(git rev-parse 'HEAD^{tree}')" = "$EXPECT_TREE"
-          test "$(git rev-parse HEAD^2)" = "$EXPECT_BASE"
           git diff HEAD --exit-code
-          printf 'event=%s source=%s tree=%s base=%s\n' "$GITHUB_SHA" "$EXPECT_SOURCE" "$EXPECT_TREE" "$EXPECT_BASE"
+          printf 'event=%s source=%s tree=%s\n' "$GITHUB_SHA" "$EXPECT_SOURCE" "$EXPECT_TREE"
           java -version
-          ./mvnw -v
-      - name: Reproduce on upstream main with the exact regression tests
-        shell: bash
+      - name: Unmodified streaming test class
+        id: original
         run: |
           set -euo pipefail
-          git worktree add --detach ../validation-base "$EXPECT_BASE"
-          trap 'git worktree remove --force ../validation-base' EXIT
-          git show "$EXPECT_SOURCE:$TEST_FILE" > "../validation-base/$TEST_FILE"
-          cd ../validation-base
-          test "$(git rev-parse HEAD)" = "$EXPECT_BASE"
           rc=0
-          ./mvnw -B --no-transfer-progress -DembeddingsSkipDownload -pl "$FOCUS_MODULE" -am \
-            "-Dtest=$FOCUS_SUITE" -Dsurefire.failIfNoSpecifiedTests=false test || rc=$?
-          printf 'base_maven_exit=%s\n' "$rc"
-          test "$rc" -ne 0
+          ./mvnw -B --no-transfer-progress -T2 -DembeddingsSkipDownload -pl "$TEST_MODULE" -am \
+            -Dtest=StreamingTest -Dsurefire.failIfNoSpecifiedTests=false test || rc=$?
+          printf 'unmodified_streaming_maven_exit=%s\n' "$rc"
           python3 - <<'CHECK'
           import os
           from pathlib import Path
           import xml.etree.ElementTree as ET
-          module = Path(os.environ['FOCUS_MODULE'])
-          suite = os.environ['FOCUS_SUITE']
-          reports = list((module / 'target/surefire-reports').glob(f'TEST-*.{suite}.xml'))
-          assert len(reports) == 1, reports
-          results = ET.parse(reports[0]).getroot()
-          failures = {case.attrib['name']: ' '.join(child.attrib.get('message','') for child in case)
-                      for case in results.findall('testcase')
-                      if case.find('failure') is not None or case.find('error') is not None}
-          assert set(failures) == set(os.environ['EXPECTED_FAILURES'].split(',')), failures
-          if suite == 'RetryDispatchTest':
-              assert all('timer can dispatch another task' in message for message in failures.values()), failures
-          else:
-              assert all('TimeoutException' in message for message in failures.values()), failures
-          print(f'Expected upstream failures on {os.environ["EXPECT_BASE"]}: {failures}')
+          module=Path(os.environ['TEST_MODULE'])
+          case,=list((module/'target/surefire-reports').glob('TEST-com.example.support.StreamingTest.xml'))
+          root=ET.parse(case).getroot()
+          failures={item.attrib['name']:item.find('failure').attrib.get('message','')
+                    for item in root.findall('testcase') if item.find('failure') is not None}
+          print('Unmodified StreamingTest summary',root.attrib,failures)
+          assert int(root.attrib['errors'])==0 and int(root.attrib['tests'])>=10
+          assert not failures or (set(failures)=={'should_rethrow_failure_of_token_stream_also_when_passed_to_on_error'}
+                and all('Expected size: 1 but was: 0' in text for text in failures.values())), failures
           CHECK
-          cd "$GITHUB_WORKSPACE"
-      - name: Focused tests
-        id: focus
-        run: ./mvnw -B --no-transfer-progress -DembeddingsSkipDownload -pl "$FOCUS_MODULE" -am "-Dtest=$FOCUS_SUITE" -Dsurefire.failIfNoSpecifiedTests=false test
-      - name: Spotless
-        shell: bash
+      - name: Controlled callback ordering
+        id: controlled
         run: |
           set -euo pipefail
-          git update-ref refs/remotes/origin/main "$EXPECT_BASE"
-          test "$(git rev-parse refs/remotes/origin/main)" = "$EXPECT_BASE"
-          ./mvnw -B --no-transfer-progress -pl "$FOCUS_MODULE" -Pspotless spotless:check
-      - name: Full Java 17 unit reactor
-        if: ${{ !cancelled() && steps.focus.outcome == 'success' }}
-        run: ./mvnw -B --no-transfer-progress -DembeddingsSkipDownload -T2 clean test
-      - name: Verify tracked source after validation
+          original=$(mktemp)
+          cp "$TEST_FILE" "$original"
+          trap 'cp "$original" "$TEST_FILE"; rm "$original"' EXIT
+          python3 - <<'EDIT'
+          import os
+          from pathlib import Path
+          path=Path(os.environ['TEST_FILE'])
+          text=path.read_text()
+          method=text.index('void should_rethrow_failure_of_token_stream_also_when_passed_to_on_error()')
+          start=text.index('        assertThatThrownBy(',method)
+          end=text.index('\n    }',start)
+          original=text[start:end]
+          assert 'onError(errors::add)' in original and 'singleElement()' in original
+          block='''var callbackEntered = new CountDownLatch(1);
+          var releaseCallback = new CountDownLatch(1);
+          var callbackFinished = new CountDownLatch(1);
+          try {
+              assertThatThrownBy(() -> capture(() -> agent.chat("Hi")
+                              .onPartialResponse(token -> {})
+                              .onError(error -> {
+                                  callbackEntered.countDown();
+                                  await(releaseCallback);
+                                  errors.add(error);
+                                  callbackFinished.countDown();
+                              })
+                              .start()))
+                      .hasMessageContaining("Stream broken");
+              await(callbackEntered);
+              assertThat(errors).isEmpty();
+              System.out.println("CONTROL_CAPTURE_RETURNED_BEFORE_ERROR_CALLBACK_SIDE_EFFECT");
+          } finally {
+              releaseCallback.countDown();
+          }
+          await(callbackFinished);
+          assertThat(errors).singleElement().satisfies(error -> assertThat(error).hasMessageContaining("Stream broken"));'''
+          path.write_text(text[:start]+'\n'.join('        '+line for line in block.splitlines())+text[end:])
+          EDIT
+          test "$(git diff --name-only)" = "$TEST_FILE"
+          ./mvnw -B --no-transfer-progress -T2 -DembeddingsSkipDownload -pl "$TEST_MODULE" -am \
+            '-Dtest=StreamingTest#should_rethrow_failure_of_token_stream_also_when_passed_to_on_error' \
+            -Dsurefire.failIfNoSpecifiedTests=false test
+      - name: Full reactor on unchanged sources
+        if: ${{ !cancelled() && steps.original.outcome == 'success' && steps.controlled.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          git diff HEAD --exit-code
+          ./mvnw -B --no-transfer-progress -DembeddingsSkipDownload -T2 --fail-at-end clean test
+      - name: Verify tracked sources after validation
         if: always()
-        shell: bash
         run: |
-          set -euo pipefail
           test "$(git rev-parse HEAD)" = "$EXPECT_SOURCE"
-          test "$(git rev-parse 'HEAD^{tree}')" = "$EXPECT_TREE"
           git diff HEAD --exit-code
