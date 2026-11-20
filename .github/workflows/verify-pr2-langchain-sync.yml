@@ -98,10 +98,17 @@ jobs:
           CHECK
           cd "$GITHUB_WORKSPACE"
       - name: Focused tests
+        id: focus
         run: ./mvnw -B --no-transfer-progress -DembeddingsSkipDownload -pl "$FOCUS_MODULE" -am "-Dtest=$FOCUS_SUITE" -Dsurefire.failIfNoSpecifiedTests=false test
       - name: Spotless
-        run: ./mvnw -B --no-transfer-progress -pl "$FOCUS_MODULE" -Pspotless spotless:check
+        shell: bash
+        run: |
+          set -euo pipefail
+          git update-ref refs/remotes/origin/main "$EXPECT_BASE"
+          test "$(git rev-parse refs/remotes/origin/main)" = "$EXPECT_BASE"
+          ./mvnw -B --no-transfer-progress -pl "$FOCUS_MODULE" -Pspotless spotless:check
       - name: Full Java 17 unit reactor
+        if: ${{ !cancelled() && steps.focus.outcome == 'success' }}
         run: ./mvnw -B --no-transfer-progress -DembeddingsSkipDownload -T2 clean test
       - name: Verify tracked source after validation
         if: always()
